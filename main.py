@@ -85,12 +85,10 @@ async def graceful_shutdown(loop: asyncio.AbstractEventLoop, timeout: float = 10
     logger.info("正在关闭adapter...")
 
     # 1. 主动关闭所有 websocket 连接
-    if server and server.is_serving():
+    if server and server.is_serving() and server.connections:
         logger.info(f"正在关闭 {len(server.connections)} 个客户端连接...")
-        for conn in server.connections:
-            conn.close()
-        # 等待一小段时间让 close frames 发送
-        await asyncio.sleep(0.1)
+        close_tasks = [conn.close() for conn in server.connections]
+        await asyncio.gather(*close_tasks, return_exceptions=True)
 
     # 2. 关闭服务器，停止接受新连接
     if server and server.is_serving():
