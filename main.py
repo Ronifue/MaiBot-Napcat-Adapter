@@ -134,8 +134,6 @@ if __name__ == "__main__":
         loop.run_until_complete(shutdown_event.wait())
     finally:
         logger.info("开始优雅关闭流程...")
-        if not main_task.done():
-            main_task.cancel()
 
         # 执行新的关机流程
         loop.run_until_complete(graceful_shutdown(loop=loop))

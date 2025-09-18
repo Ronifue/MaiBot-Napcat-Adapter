@@ -1,4 +1,3 @@
-import asyncio
 from maim_message import Router, RouteConfig, TargetConfig
 from .config import global_config
 from .logger import logger, custom_logger
@@ -13,8 +12,6 @@ route_config = RouteConfig(
     }
 )
 router = Router(route_config, custom_logger)
-_mmc_stop_lock = asyncio.Lock()
-_mmc_stopped = False
 
 
 async def mmc_start_com():
@@ -24,9 +21,4 @@ async def mmc_start_com():
 
 
 async def mmc_stop_com():
-    global _mmc_stopped
-    async with _mmc_stop_lock:
-        if not _mmc_stopped:
-            _mmc_stopped = True
-            logger.info("正在停止 MMC com layer...")
-            await router.stop()
+    await router.stop()
