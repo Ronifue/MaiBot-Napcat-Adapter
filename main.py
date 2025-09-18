@@ -13,9 +13,9 @@ from src.send_handler.nc_sending import nc_message_sender
 from src.config import global_config
 from src.mmc_com_layer import mmc_start_com, mmc_stop_com, router
 from src.response_pool import put_response, check_timeout_response
-from src.shared_state import shutdown_event
 
 message_queue = asyncio.Queue()
+server: Server.Server = None  # Global server instance
 
 
 async def message_recv(server_connection: Server.ServerConnection):
@@ -33,15 +33,9 @@ async def message_recv(server_connection: Server.ServerConnection):
 
 
 async def message_process():
-    while not shutdown_event.is_set():
+    while True:
         try:
             message = await asyncio.wait_for(message_queue.get(), timeout=1.0)
-        except asyncio.TimeoutError:
-            continue
-        except asyncio.CancelledError:
-            break
-
-        try:
             post_type = message.get("post_type")
             if post_type == "message":
                 await message_handler.handle_raw_message(message)
@@ -52,8 +46,10 @@ async def message_process():
             else:
                 logger.warning(f"未知的post_type: {post_type}")
             message_queue.task_done()
-        except Exception as e:
-            logger.exception(f"处理消息时发生错误: {e}")
+        except asyncio.TimeoutError:
+            continue
+        except asyncio.CancelledError:
+            break
 
 
 async def main():
@@ -76,52 +72,58 @@ def check_napcat_server_token(conn, request):
 
 
 async def napcat_server():
+    global server
     logger.info("正在启动adapter...")
-    async with Server.serve(
+    server = await Server.serve(
         message_recv,
         global_config.napcat_server.host,
         global_config.napcat_server.port,
         max_size=2**26,
         process_request=check_napcat_server_token,
-    ) as server:
-        logger.info(f"Adapter已启动，监听地址: ws://{global_config.napcat_server.host}:{global_config.napcat_server.port}")
-        await server.serve_forever()
+    )
+    logger.info(f"Adapter已启动，监听地址: ws://{global_config.napcat_server.host}:{global_config.napcat_server.port}")
+    await server.wait_closed()
 
 
-async def graceful_shutdown(timeout: float = 10.0):
+async def graceful_shutdown(loop: asyncio.AbstractEventLoop, timeout: float = 10.0):
     logger.info("正在关闭adapter...")
 
-    # 1. 停止接受新连接和任务
-    # (通过取消main_task实现)
+    # 1. 主动关闭所有 websocket 连接
+    if server and server.ws_server.is_serving():
+        logger.info(f"正在关闭 {len(server.connections)} 个客户端连接...")
+        for conn in server.connections:
+            conn.close()
+        # 等待一小段时间让 close frames 发送
+        await asyncio.sleep(0.1)
 
-    # 2. 关闭网络连接
+    # 2. 关闭服务器，停止接受新连接
+    if server and server.ws_server.is_serving():
+        logger.info("正在关闭 Websocket 服务器...")
+        server.close()
+        await server.wait_closed()
+        logger.info("Websocket 服务器已关闭")
+
+    # 3. 关闭 aiohttp 客户端
     await mmc_stop_com()
     logger.info("MMC com layer 已停止")
 
-    # 3. 取消所有剩余任务
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    # 4. 取消所有其他任务
+    tasks = [t for t in asyncio.all_tasks(loop=loop) if t is not asyncio.current_task()]
     if tasks:
-        logger.info(f"正在取消 {len(tasks)} 个任务...")
+        logger.info(f"正在取消 {len(tasks)} 个剩余任务...")
         for task in tasks:
-            if not task.done():
-                logger.info(f"正在取消任务: {task.get_name()}")
-                task.cancel()
+            task.cancel()
 
-        # 4. 等待任务完成，带超时
-        try:
-            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), timeout)
-            logger.info("所有任务已成功取消")
-        except asyncio.TimeoutError:
-            logger.error(f"Adapter关闭中出现错误: 触发{timeout}秒超时强制关闭")
-        except Exception as e:
-            logger.error(f"Adapter关闭中出现未知错误: {e}")
+        await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info("所有剩余任务已处理完毕")
 
-    logger.info("Adapter已成功关闭")
+    logger.info("Adapter 已成功关闭")
 
 
 if __name__ == "__main__":
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
+    shutdown_event = asyncio.Event()
 
     def _shutdown_handler(sig: int):
         logger.warning(f"收到信号 {signal.Signals(sig).name}，开始关闭...")
@@ -131,25 +133,20 @@ if __name__ == "__main__":
         try:
             loop.add_signal_handler(sig, _shutdown_handler, sig)
         except NotImplementedError:
-            # windows 不支持 add_signal_handler
-            pass
+            pass  # Windows
 
-    main_task = None
     try:
         main_task = loop.create_task(main())
         loop.run_until_complete(shutdown_event.wait())
-    except Exception as e:
-        logger.exception(f"主程序异常: {str(e)}")
     finally:
-        if main_task and not main_task.done():
+        logger.info("开始优雅关闭流程...")
+        if not main_task.done():
             main_task.cancel()
-            try:
-                loop.run_until_complete(main_task)
-            except asyncio.CancelledError:
-                pass  # 任务取消是预期的
 
-        loop.run_until_complete(graceful_shutdown())
+        # 执行新的关机流程
+        loop.run_until_complete(graceful_shutdown(loop=loop))
 
+        # 最终关闭循环
         if loop and not loop.is_closed():
             loop.close()
         logger.info("程序已退出")

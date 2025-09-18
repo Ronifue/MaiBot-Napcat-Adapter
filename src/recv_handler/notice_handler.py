@@ -1,13 +1,11 @@
 import time
 import json
 import asyncio
-import websockets
 import websockets as Server
 from typing import Tuple, Optional
 
 from src.logger import logger
 from src.config import global_config
-from src.shared_state import shutdown_event
 from src.database import BanUser, db_manager, is_identical
 from . import NoticeType, ACCEPT_FORMAT
 from .message_sending import message_send_instance
@@ -381,63 +379,57 @@ class NoticeHandler:
             await notice_queue.put(message_base)
 
     async def handle_natural_lift(self) -> None:
-        while not shutdown_event.is_set():
-            try:
-                if len(self.lifted_list) != 0:
-                    lift_record = self.lifted_list.pop()
-                    group_id = lift_record.group_id
-                    user_id = lift_record.user_id
+        while True:
+            if len(self.lifted_list) != 0:
+                lift_record = self.lifted_list.pop()
+                group_id = lift_record.group_id
+                user_id = lift_record.user_id
 
-                    db_manager.delete_ban_record(lift_record)  # 从数据库中删除禁言记录
+                db_manager.delete_ban_record(lift_record)  # 从数据库中删除禁言记录
 
-                    seg_message: Seg = await self.natural_lift(group_id, user_id)
+                seg_message: Seg = await self.natural_lift(group_id, user_id)
 
-                    fetched_group_info = await get_group_info(self.server_connection, group_id)
-                    group_name: str = None
-                    if fetched_group_info:
-                        group_name = fetched_group_info.get("group_name")
-                    else:
-                        logger.warning("无法获取notice消息所在群的名称")
-                    group_info = GroupInfo(
-                        platform=global_config.maibot_server.platform_name,
-                        group_id=group_id,
-                        group_name=group_name,
-                    )
-
-                    message_info: BaseMessageInfo = BaseMessageInfo(
-                        platform=global_config.maibot_server.platform_name,
-                        message_id="notice",
-                        time=time.time(),
-                        user_info=None,  # 自然解除禁言没有操作者
-                        group_info=group_info,
-                        template_info=None,
-                        format_info=None,
-                    )
-
-                    message_base: MessageBase = MessageBase(
-                        message_info=message_info,
-                        message_segment=seg_message,
-                        raw_message=json.dumps(
-                            {
-                                "post_type": "notice",
-                                "notice_type": "group_ban",
-                                "sub_type": "lift_ban",
-                                "group_id": group_id,
-                                "user_id": user_id,
-                                "operator_id": None,  # 自然解除禁言没有操作者
-                            }
-                        ),
-                    )
-
-                    await self.put_notice(message_base)
-                    await asyncio.sleep(0.5)  # 确保队列处理间隔
+                fetched_group_info = await get_group_info(self.server_connection, group_id)
+                group_name: str = None
+                if fetched_group_info:
+                    group_name = fetched_group_info.get("group_name")
                 else:
-                    await asyncio.sleep(5)  # 每5秒检查一次
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("handle_natural_lift 任务出现意外错误")
-                await asyncio.sleep(5)
+                    logger.warning("无法获取notice消息所在群的名称")
+                group_info = GroupInfo(
+                    platform=global_config.maibot_server.platform_name,
+                    group_id=group_id,
+                    group_name=group_name,
+                )
+
+                message_info: BaseMessageInfo = BaseMessageInfo(
+                    platform=global_config.maibot_server.platform_name,
+                    message_id="notice",
+                    time=time.time(),
+                    user_info=None,  # 自然解除禁言没有操作者
+                    group_info=group_info,
+                    template_info=None,
+                    format_info=None,
+                )
+
+                message_base: MessageBase = MessageBase(
+                    message_info=message_info,
+                    message_segment=seg_message,
+                    raw_message=json.dumps(
+                        {
+                            "post_type": "notice",
+                            "notice_type": "group_ban",
+                            "sub_type": "lift_ban",
+                            "group_id": group_id,
+                            "user_id": user_id,
+                            "operator_id": None,  # 自然解除禁言没有操作者
+                        }
+                    ),
+                )
+
+                await self.put_notice(message_base)
+                await asyncio.sleep(0.5)  # 确保队列处理间隔
+            else:
+                await asyncio.sleep(5)  # 每5秒检查一次
 
     async def natural_lift(self, group_id: int, user_id: int) -> Seg | None:
         if not group_id:
@@ -476,54 +468,49 @@ class NoticeHandler:
         )
 
     async def auto_lift_detect(self) -> None:
-        while not shutdown_event.is_set():
-            try:
-                if len(self.banned_list) == 0:
-                    await asyncio.sleep(5)
+        while True:
+            if len(self.banned_list) == 0:
+                await asyncio.sleep(5)
+                continue
+            for ban_record in self.banned_list:
+                if ban_record.user_id == 0 or ban_record.lift_time == -1:
                     continue
-                for ban_record in self.banned_list:
-                    if ban_record.user_id == 0 or ban_record.lift_time == -1:
-                        continue
-                    if ban_record.lift_time <= int(time.time()):
-                        # 触发自然解除禁言
-                        logger.info(f"检测到用户 {ban_record.user_id} 在群 {ban_record.group_id} 的禁言已解除")
-                        self.lifted_list.append(ban_record)
-                        self.banned_list.remove(ban_record)
-                await asyncio.sleep(5)
-            except asyncio.CancelledError:
-                break
-            except Exception:
-                logger.exception("auto_lift_detect 任务出现意外错误")
-                await asyncio.sleep(5)
+                if ban_record.lift_time <= int(time.time()):
+                    # 触发自然解除禁言
+                    logger.info(f"检测到用户 {ban_record.user_id} 在群 {ban_record.group_id} 的禁言已解除")
+                    self.lifted_list.append(ban_record)
+                    self.banned_list.remove(ban_record)
+            await asyncio.sleep(5)
 
     async def send_notice(self) -> None:
         """
         发送通知消息到Napcat
         """
-        while not shutdown_event.is_set():
+        while True:
+            if not unsuccessful_notice_queue.empty():
+                to_be_send: MessageBase = await unsuccessful_notice_queue.get()
+                try:
+                    send_status = await message_send_instance.message_send(to_be_send)
+                    if send_status:
+                        unsuccessful_notice_queue.task_done()
+                    else:
+                        await unsuccessful_notice_queue.put(to_be_send)
+                except Exception as e:
+                    logger.error(f"发送通知消息失败: {str(e)}")
+                    await unsuccessful_notice_queue.put(to_be_send)
+                await asyncio.sleep(1)
+                continue
+            to_be_send: MessageBase = await notice_queue.get()
             try:
-                # 使用小的超时让get()可以被中断
-                message = await asyncio.wait_for(notice_queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue  # 队列为空，继续检查 shutdown_event
-            except asyncio.CancelledError:
-                break
-
-            try:
-                send_status = await message_send_instance.message_send(message)
+                send_status = await message_send_instance.message_send(to_be_send)
                 if send_status:
                     notice_queue.task_done()
                 else:
-                    await unsuccessful_notice_queue.put(message)
-            except (websockets.ConnectionClosed, websockets.ConnectionClosedError) as e:
-                logger.warning(f"发送通知时连接关闭，消息将稍后重试: {e}")
-                await unsuccessful_notice_queue.put(message)
+                    await unsuccessful_notice_queue.put(to_be_send)
             except Exception as e:
-                if isinstance(e, asyncio.CancelledError):
-                    # 确保CancelledError可以传播
-                    raise
-                logger.exception(f"发送通知时发生未知错误，消息将稍后重试: {e}")
-                await unsuccessful_notice_queue.put(message)
+                logger.error(f"发送通知消息失败: {str(e)}")
+                await unsuccessful_notice_queue.put(to_be_send)
+            await asyncio.sleep(1)
 
 
 notice_handler = NoticeHandler()
