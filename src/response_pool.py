@@ -3,6 +3,7 @@ import time
 from typing import Dict
 from .config import global_config
 from .logger import logger
+from .shared_state import shutdown_event
 
 response_dict: Dict = {}
 response_time_dict: Dict = {}
@@ -31,14 +32,21 @@ async def put_response(response: dict):
 
 
 async def check_timeout_response() -> None:
-    while True:
-        cleaned_message_count: int = 0
-        now_time = time.time()
-        for echo_id, response_time in list(response_time_dict.items()):
-            if now_time - response_time > global_config.napcat_server.heartbeat_interval:
-                cleaned_message_count += 1
-                response_dict.pop(echo_id)
-                response_time_dict.pop(echo_id)
-                logger.warning(f"响应消息 {echo_id} 超时，已删除")
-        logger.info(f"已删除 {cleaned_message_count} 条超时响应消息")
-        await asyncio.sleep(global_config.napcat_server.heartbeat_interval)
+    while not shutdown_event.is_set():
+        try:
+            cleaned_message_count: int = 0
+            now_time = time.time()
+            for echo_id, response_time in list(response_time_dict.items()):
+                if now_time - response_time > global_config.napcat_server.heartbeat_interval:
+                    cleaned_message_count += 1
+                    response_dict.pop(echo_id)
+                    response_time_dict.pop(echo_id)
+                    logger.warning(f"响应消息 {echo_id} 超时，已删除")
+            if cleaned_message_count > 0:
+                logger.info(f"已清理 {cleaned_message_count} 条超时响应消息")
+            await asyncio.sleep(global_config.napcat_server.heartbeat_interval)
+        except asyncio.CancelledError:
+            break
+        except Exception:
+            logger.exception("检查超时响应任务出现意外错误")
+            await asyncio.sleep(global_config.napcat_server.heartbeat_interval)
