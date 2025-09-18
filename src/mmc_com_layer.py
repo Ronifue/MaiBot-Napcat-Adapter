@@ -12,6 +12,7 @@ route_config = RouteConfig(
     }
 )
 router = Router(route_config, custom_logger)
+_mmc_stopped = False
 
 
 async def mmc_start_com():
@@ -21,4 +22,7 @@ async def mmc_start_com():
 
 
 async def mmc_stop_com():
-    await router.stop()
+    global _mmc_stopped
+    if not _mmc_stopped:
+        _mmc_stopped = True
+        await router.stop()
