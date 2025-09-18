@@ -34,22 +34,18 @@ async def message_recv(server_connection: Server.ServerConnection):
 
 async def message_process():
     while True:
-        try:
-            message = await asyncio.wait_for(message_queue.get(), timeout=1.0)
-            post_type = message.get("post_type")
-            if post_type == "message":
-                await message_handler.handle_raw_message(message)
-            elif post_type == "meta_event":
-                await meta_event_handler.handle_meta_event(message)
-            elif post_type == "notice":
-                await notice_handler.handle_notice(message)
-            else:
-                logger.warning(f"未知的post_type: {post_type}")
-            message_queue.task_done()
-        except asyncio.TimeoutError:
-            continue
-        except asyncio.CancelledError:
-            break
+        message = await message_queue.get()
+        post_type = message.get("post_type")
+        if post_type == "message":
+            await message_handler.handle_raw_message(message)
+        elif post_type == "meta_event":
+            await meta_event_handler.handle_meta_event(message)
+        elif post_type == "notice":
+            await notice_handler.handle_notice(message)
+        else:
+            logger.warning(f"未知的post_type: {post_type}")
+        message_queue.task_done()
+        await asyncio.sleep(0.05)
 
 
 async def main():
@@ -89,7 +85,7 @@ async def graceful_shutdown(loop: asyncio.AbstractEventLoop, timeout: float = 10
     logger.info("正在关闭adapter...")
 
     # 1. 主动关闭所有 websocket 连接
-    if server and server.ws_server.is_serving():
+    if server and server.is_serving():
         logger.info(f"正在关闭 {len(server.connections)} 个客户端连接...")
         for conn in server.connections:
             conn.close()
@@ -97,7 +93,7 @@ async def graceful_shutdown(loop: asyncio.AbstractEventLoop, timeout: float = 10
         await asyncio.sleep(0.1)
 
     # 2. 关闭服务器，停止接受新连接
-    if server and server.ws_server.is_serving():
+    if server and server.is_serving():
         logger.info("正在关闭 Websocket 服务器...")
         server.close()
         await server.wait_closed()
